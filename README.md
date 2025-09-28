@@ -23,7 +23,7 @@ No more memorizing long `ros2 run` or `ros2 launch` commands, just point it to y
   - Detects `.launch.py`, `.launch.xml`, `.launch.yaml`, and files ending with `_launch.*`.
   - Works for both **source** (`./launch/`) and **installed** (`share/<pkg>/launch/`) packages.
   - Automatically parses and prompts for **launch arguments** (Python, XML, YAML).
-  - Provides a dialog box where you can override defaults before launching.
+  - Provides a dialog box where you can override default argument specification before launching.
 
 - 📝 **Custom Launch**
   - Enter either a **path** or a `<package> <launch_file>` spec.
@@ -80,12 +80,15 @@ chmod +x desktop_setup.sh
 ./desktop_setup.sh
 ```
 
-## 💻 Setting Up Desired Terminal
+## 💻 Setting Up Desired Terminal and ROS2 distro
 
-In the code, you can set up the preferred terminal by placing it first in the list.
+In the code, you can set up the preferred terminal by placing it first in the list in *TERMINAL* list.
 For example, if Terminator is listed first, the script will try to use it.
-If it isn’t installed, it will fall back to the next available option.
+If it isn’t installed, it will fall back to the next available option. Also you can set default ROS2 distro by chagning *DEFAULT_ROS_SETUP* argument:
 ```bash
+# ----------------------------- Config (edit to taste) ----------------------------
+DEFAULT_ROS_SETUP = "/opt/ros/jazzy/setup.bash"   # change to your distro if needed
+DEFAULT_WS_SETUP = ""                              # blank -> auto-detect upward install/setup.bash
 TERMINALS = [
     ["terminator", "-e", "bash -lc '{CMD}; exec bash'"],
     ["gnome-terminal", "--", "bash", "-lc", "{CMD}; exec bash"],
@@ -95,6 +98,7 @@ TERMINALS = [
     ["kitty", "bash", "-lc", "{CMD}; exec bash"],
     ["alacritty", "-e", "bash", "-lc", "{CMD}; exec bash"],
 ]
+...
 ```
 
 ## 📧 Credits
