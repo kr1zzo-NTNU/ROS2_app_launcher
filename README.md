@@ -39,7 +39,9 @@ No more memorizing long `ros2 run` or `ros2 launch` commands, just point it to y
   - Launchable from your system’s application menu.
   - Search **"ROS 2 App Launcher"** in your desktop environment.
 
-
+- 🔧 **No More Manual Sourcing**
+  - The app automatically sources both the ROS2 distro and workspace `setup.bash` files.
+  - Works out of the box — no extra steps needed.
 
 ## 📂 Project structure
 
@@ -60,6 +62,8 @@ git clone https://github.com/kr1zzo-NTNU/ROS2_app_launcher.git
 - **Tkinter** for GUI:
   ```bash
   sudo apt install python3-tk
+
+## 
 
 ## ▶️ Running the code
 
