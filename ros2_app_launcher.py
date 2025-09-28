@@ -10,11 +10,18 @@ ROS 2 App Launcher (Tkinter)
 - Handy buttons for RViz2, rqt_graph, and rqt
 
 Fixes in this version:
-* **Strict launch filter**: only matches files ending with `.launch.py|xml|yaml` **or** `_launch.py|xml|yaml`. No PNGs or other noise.
-* **Installed launches work** even if this app wasn't started from a sourced shell. We synthesize an env by sourcing the setup files in a subshell and reading it back.
-* **Subfolder launches** under `share/<pkg>/launch/**` run as `ros2 launch <pkg> sub/dir/file.launch.py`.
-* **Args fields**: provide extra args for `ros2 run` and `ros2 launch`, plus a "Run Custom" launcher.
-* **NEW**: Parses launch arguments (py/xml/yaml) and prompts for values before launching.
+* Strict launch filter: only matches files ending with `.launch.py|xml|yaml` or `_launch.py|xml|yaml`. No PNGs or noise.
+* Installed launches work even if this app wasn't started from a sourced shell.
+* Subfolder launches under share/<pkg>/launch/** run as `ros2 launch <pkg> sub/dir/file.launch.py`.
+* Args fields for `ros2 run` and `ros2 launch`, plus a "Run Custom" launcher.
+* Parses launch arguments (py/xml/yaml) and prompts for values before launching.
+
+Process tracking additions:
+* Green highlight for items that are running (persists even if you stop other items).
+* Right-click → Stop on the item (execs, launches, and the “Running” panel).
+* Stable run tracking (does not rely on listbox indices).
+* **Running panel is larger and scrollable (both directions)**; double-click or right-click to stop.
+* Auto-clear highlight when the process exits (background poll).
 """
 
 import argparse
@@ -25,7 +32,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import uuid
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -40,6 +49,7 @@ except Exception:
 DEFAULT_ROS_SETUP = "/opt/ros/jazzy/setup.bash"   # change to your distro if needed
 DEFAULT_WS_SETUP = ""                              # blank -> auto-detect upward install/setup.bash
 TERMINALS = [
+    ["terminator", "-e", "bash -lc '{CMD}; exec bash'"],
     ["gnome-terminal", "--", "bash", "-lc", "{CMD}; exec bash"],
     ["x-terminal-emulator", "-e", "bash", "-lc", "{CMD}; exec bash"],
     ["konsole", "-e", "bash", "-lc", "{CMD}; exec bash"],
@@ -47,6 +57,9 @@ TERMINALS = [
     ["kitty", "bash", "-lc", "{CMD}; exec bash"],
     ["alacritty", "-e", "bash", "-lc", "{CMD}; exec bash"],
 ]
+
+RUN_HILITE_BG = "#d6f5d6"
+RUN_HILITE_SEL = "#a8e6a8"
 # ----------------------------------------------------------------------------------
 
 
@@ -62,6 +75,20 @@ class LaunchItem:
     pkg: Optional[str]
     path: Path  # absolute file path
     rel_from_share_launch: Optional[Path] = None  # for installed items
+
+
+# A record of each started run (exec or launch)
+@dataclass
+class RunRecord:
+    run_id: str         # uuid
+    kind: str           # "exec" or "launch"
+    pkg: str            # package name (or "<path>" for unbound custom path)
+    item_key: str       # stable key for this item
+    display_name: str   # exe name or launch file (name or relpath)
+    marker: str         # unique marker string used for pgrep/pkill
+    cmd: str            # full shell command (with source prefix etc.)
+    cwd: Optional[Path] # working dir
+    active: bool = True
 
 
 # ----------------------------- Helper functions ----------------------------------
@@ -228,6 +255,7 @@ def build_source_cmd(ros_setup: str, ws_setup: str) -> str:
 
 
 def open_in_terminal(command: str, cwd: Optional[Path] = None) -> bool:
+    """Spawn command in a terminal and leave the window open."""
     env = os.environ.copy()
     for template in TERMINALS:
         exe = template[0]
@@ -361,6 +389,35 @@ def parse_launch_args_generic(path: Path):
     return []
 
 
+# ----------------------------- Process tracking via marker -----------------------
+
+def _inject_marker(cmd: str) -> tuple[str, str, str]:
+    """Prefix a harmless no-op that embeds a unique marker we can match with pgrep/pkill.
+    Returns (tagged_cmd, marker, run_id).
+    """
+    run_id = uuid.uuid4().hex
+    marker = f"ROSAPP:{run_id}"
+    tagged = f': "{marker}"; {cmd}'
+    return tagged, marker, run_id
+
+def _marker_alive(marker: str) -> bool:
+    try:
+        rc = subprocess.call(["bash", "-lc", f'pgrep -f "{marker}" >/dev/null 2>&1'])
+        return rc == 0
+    except Exception:
+        return False
+
+def _stop_by_marker(marker: str):
+    try:
+        # graceful first
+        subprocess.call(["bash", "-lc", f'pkill -INT -f "{marker}"'])
+        subprocess.call(["bash", "-lc", "sleep 1"])
+        # escalate if still alive
+        subprocess.call(["bash", "-lc", f'pgrep -f "{marker}" >/dev/null 2>&1 && pkill -TERM -f "{marker}" || true'])
+    except Exception:
+        pass
+
+
 # ----------------------------- GUI (Tkinter) --------------------------------------
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -397,11 +454,9 @@ class ArgDialog(tk.Toplevel):
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right", padx=4)
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=4)
 
-        # --- safer mapping + grab order ---
         self.transient(parent)
         self.withdraw()
         self.update_idletasks()
-        # center on parent
         try:
             px, py = parent.winfo_rootx(), parent.winfo_rooty()
             pw, ph = parent.winfo_width(), parent.winfo_height()
@@ -417,7 +472,6 @@ class ArgDialog(tk.Toplevel):
         except Exception:
             pass
 
-        # Let Enter confirm; focus first entry
         self.bind("<Return>", lambda e: self._ok())
         if self.entries:
             self.entries[0][1].focus_set()
@@ -442,7 +496,7 @@ class Ros2App(tk.Tk):
     def __init__(self, root_path: Path, ros_setup: str, ws_setup: str):
         super().__init__()
         self.title("ROS 2 App Launcher")
-        self.geometry("1240x860")
+        self.geometry("1240x950")
 
         self.root_path = root_path
         self.ros_setup = ros_setup
@@ -461,13 +515,21 @@ class Ros2App(tk.Tk):
         # map: listbox index -> ("src", Path) OR ("inst", LaunchItem)
         self.launch_map: Dict[int, Tuple[str, object]] = {}
 
+        # Running registry
+        self.runs: Dict[str, RunRecord] = {}  # run_id -> RunRecord
+        self.key_to_runids: defaultdict[str, set[str]] = defaultdict(set)
+
         # args vars
         self.exec_args_var = tk.StringVar()
         self.launch_args_var = tk.StringVar()
         self.custom_launch_var = tk.StringVar()
 
+        # UI handle
+        self.running_list: Optional[tk.Listbox] = None
+
         self._build_ui()
         self._load_packages()
+        self._start_poll()
 
     # -------------------- UI --------------------
     def _build_ui(self):
@@ -497,6 +559,7 @@ class Ros2App(tk.Tk):
         ex_frame.pack(fill="x", expand=False, pady=(0, 6))
         self.exe_list = tk.Listbox(ex_frame, height=10, exportselection=False)
         self.exe_list.pack(fill="x", expand=False)
+        self.exe_list.bind("<Button-3>", self._exec_ctx_menu)  # right-click stop
 
         ex_args_row = ttk.Frame(ex_frame)
         ex_args_row.pack(fill="x", pady=(6, 0))
@@ -508,6 +571,7 @@ class Ros2App(tk.Tk):
         self.launch_list = tk.Listbox(ln_frame, height=18, exportselection=False)
         self.launch_list.pack(fill="both", expand=True)
         self.launch_list.bind("<Double-Button-1>", self._on_launch_double)
+        self.launch_list.bind("<Button-3>", self._launch_ctx_menu)  # right-click stop
 
         ln_args_row = ttk.Frame(ln_frame)
         ln_args_row.pack(fill="x", pady=(6, 0))
@@ -528,6 +592,37 @@ class Ros2App(tk.Tk):
         ttk.Button(btns, text="Open RViz2", command=lambda: self._run_tool("rviz2")).pack(side="left", padx=18)
         ttk.Button(btns, text="rqt_graph", command=lambda: self._run_tool("ros2 run rqt_graph rqt_graph")).pack(side="left", padx=4)
         ttk.Button(btns, text="rqt (plugins)", command=lambda: self._run_tool("rqt")).pack(side="left", padx=4)
+
+        # Running panel (bigger + scrollbars)
+        running_frame = ttk.LabelFrame(self, text="Running", padding=6)
+        running_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        rf = ttk.Frame(running_frame)
+        rf.pack(fill="both", expand=True)
+
+        run_scroll_y = ttk.Scrollbar(rf, orient="vertical")
+        run_scroll_x = ttk.Scrollbar(rf, orient="horizontal")
+
+        self.running_list = tk.Listbox(
+            rf,
+            height=14,            # larger area
+            exportselection=False,
+            xscrollcommand=run_scroll_x.set,
+            yscrollcommand=run_scroll_y.set
+        )
+
+        run_scroll_y.config(command=self.running_list.yview)
+        run_scroll_x.config(command=self.running_list.xview)
+
+        self.running_list.grid(row=0, column=0, sticky="nsew")
+        run_scroll_y.grid(row=0, column=1, sticky="ns")
+        run_scroll_x.grid(row=1, column=0, sticky="ew")
+
+        rf.rowconfigure(0, weight=1)
+        rf.columnconfigure(0, weight=1)
+
+        self.running_list.bind("<Button-3>", self._running_ctx_menu)
+        self.running_list.bind("<Double-Button-1>", lambda _e: self._stop_selected_running())
 
         # Status
         self.status = tk.StringVar(value="Ready.")
@@ -551,6 +646,7 @@ class Ros2App(tk.Tk):
         self.launch_list.delete(0, "end")
         self.launch_map.clear()
         self.selected_pkg = None
+        # markers stay; polling refreshes visuals
 
     def _rebuild_tree(self):
         # Build a folder tree from package src dirs
@@ -623,19 +719,20 @@ class Ros2App(tk.Tk):
             self.launch_list.insert("end", f"[src] {lf.name}")
             self.launch_map[idx] = ("src", lf)
 
-        # Installed (preserve subdirectories)
+        # Installed (preserve subdirectories; display only filename here)
         inst_launches = list_installed_launch_files(info.name, env=self.scanned_env)
         for li in inst_launches:
             idx = self.launch_list.size()
-            # show just filename (or use li.rel_from_share_launch.as_posix() to show subpath)
             self.launch_list.insert("end", f"[inst] {li.path.name}")
             self.launch_map[idx] = ("inst", li)
 
         self._set_status(
             f"{info.name}: {len(exes)} executables, {len(src_launches) + len(inst_launches)} launch files"
         )
+        # Reapply highlights for visible items of this package
+        self._reapply_highlights_for_pkg(info.name)
 
-    # -------------------- Run helpers --------------------
+    # -------------------- Run helpers + tracking --------------------
     def _prefixed(self, cmd: str, workdir: Optional[Path] = None) -> str:
         pieces = []
         if self.source_prefix:
@@ -645,6 +742,239 @@ class Ros2App(tk.Tk):
         pieces.append(cmd)
         return " && ".join(pieces)
 
+    def _hilite_on(self, listbox: tk.Listbox, idx: int):
+        try:
+            listbox.itemconfig(idx, background=RUN_HILITE_BG, selectbackground=RUN_HILITE_SEL)
+        except Exception:
+            pass
+
+    def _hilite_off(self, listbox: tk.Listbox, idx: int):
+        try:
+            listbox.itemconfig(idx, background="", selectbackground="")
+        except Exception:
+            pass
+
+    # ----- stable keys -----
+    def _exec_key(self, pkg: str, exe: str) -> str:
+        return f"exec::{pkg}::{exe}"
+
+    def _launch_key(self, pkg: str, tag: str, leaf_or_rel: str) -> str:
+        return f"launch::{pkg}::{tag}::{leaf_or_rel}"
+
+    # ----- registry ops -----
+    def _register_run(self, rec: RunRecord):
+        self.runs[rec.run_id] = rec
+        self.key_to_runids[rec.item_key].add(rec.run_id)
+        self._update_running_panel()
+
+    def _unregister_run(self, run_id: str):
+        rec = self.runs.get(run_id)
+        if not rec:
+            return
+        self.key_to_runids[rec.item_key].discard(run_id)
+        if not self.key_to_runids[rec.item_key]:
+            self.key_to_runids.pop(rec.item_key, None)
+        self.runs.pop(run_id, None)
+        self._update_running_panel()
+
+    def _update_running_panel(self):
+        if not self.running_list:
+            return
+        self.running_list.delete(0, "end")
+        active = [r for r in self.runs.values() if r.active]
+        for r in sorted(active, key=lambda x: (x.kind, x.pkg, x.display_name)):
+            label = f"[{r.kind}] {r.pkg} :: {r.display_name}"
+            self.running_list.insert("end", label)
+        for i in range(self.running_list.size()):
+            try:
+                self.running_list.itemconfig(i, background=RUN_HILITE_BG)
+            except Exception:
+                pass
+        # keep scrolled to the left
+        try:
+            self.running_list.xview_moveto(0.0)
+        except Exception:
+            pass
+
+    def _reapply_highlights_for_pkg(self, pkg: str):
+        # execs
+        for i in range(self.exe_list.size()):
+            exe = self.exe_list.get(i)
+            key = self._exec_key(pkg, exe)
+            live = any(self.runs[rid].active for rid in self.key_to_runids.get(key, []))
+            (self._hilite_on if live else self._hilite_off)(self.exe_list, i)
+        # launches
+        for i in range(self.launch_list.size()):
+            raw = self.launch_list.get(i)  # "[src] foo.launch.py" or "[inst] foo.launch.py"
+            if raw.startswith("[src] "):
+                tag = "src"
+                leaf = raw[len("[src] "):]
+                key = self._launch_key(pkg, tag, leaf)
+            elif raw.startswith("[inst] "):
+                tag = "inst"
+                leaf = raw[len("[inst] "):]
+                key = self._launch_key(pkg, tag, leaf)
+            else:
+                continue
+            live = any(self.runs[rid].active for rid in self.key_to_runids.get(key, []))
+            (self._hilite_on if live else self._hilite_off)(self.launch_list, i)
+
+    # ----- context menus -----
+    def _exec_ctx_menu(self, ev):
+        idx = self.exe_list.nearest(ev.y)
+        if idx is not None and idx >= 0:
+            self.exe_list.selection_clear(0, "end")
+            self.exe_list.selection_set(idx)
+            self.exe_list.activate(idx)
+        menu = tk.Menu(self, tearoff=0)
+        # enable stop if any run active for this item
+        if idx is not None and idx >= 0 and self.selected_pkg:
+            exe = self.exe_list.get(idx)
+            key = self._exec_key(self.selected_pkg.name, exe)
+            has_active = any(self.runs[rid].active for rid in self.key_to_runids.get(key, []))
+        else:
+            has_active = False
+        menu.add_command(label="Stop", state=("normal" if has_active else "disabled"), command=self._stop_selected_exec)
+        try:
+            menu.tk_popup(ev.x_root, ev.y_root)
+        finally:
+            menu.grab_release()
+
+    def _launch_ctx_menu(self, ev):
+        idx = self.launch_list.nearest(ev.y)
+        if idx is not None and idx >= 0:
+            self.launch_list.selection_clear(0, "end")
+            self.launch_list.selection_set(idx)
+            self.launch_list.activate(idx)
+        has_active = False
+        if idx is not None and idx >= 0 and self.selected_pkg:
+            raw = self.launch_list.get(idx)
+            if raw.startswith("[src] "):
+                tag, leaf = "src", raw[len("[src] "):]
+                key = self._launch_key(self.selected_pkg.name, tag, leaf)
+            elif raw.startswith("[inst] "):
+                tag, leaf = "inst", raw[len("[inst] "):]
+                key = self._launch_key(self.selected_pkg.name, tag, leaf)
+            else:
+                key = ""
+            if key:
+                has_active = any(self.runs[rid].active for rid in self.key_to_runids.get(key, []))
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Stop", state=("normal" if has_active else "disabled"), command=self._stop_selected_launch)
+        try:
+            menu.tk_popup(ev.x_root, ev.y_root)
+        finally:
+            menu.grab_release()
+
+    def _running_ctx_menu(self, ev):
+        if not self.running_list:
+            return
+        idx = self.running_list.nearest(ev.y)
+        if idx is not None and idx >= 0:
+            self.running_list.selection_clear(0, "end")
+            self.running_list.selection_set(idx)
+            self.running_list.activate(idx)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Stop", command=self._stop_selected_running)
+        try:
+            menu.tk_popup(ev.x_root, ev.y_root)
+        finally:
+            menu.grab_release()
+
+    # ----- stops -----
+    def _stop_selected_exec(self):
+        if not self.selected_pkg:
+            return
+        sel = self.exe_list.curselection()
+        if not sel:
+            return
+        exe = self.exe_list.get(sel[0])
+        key = self._exec_key(self.selected_pkg.name, exe)
+        run_ids = [rid for rid in self.key_to_runids.get(key, []) if self.runs[rid].active]
+        if not run_ids:
+            return
+        rid = sorted(run_ids)[-1]
+        rec = self.runs[rid]
+        _stop_by_marker(rec.marker)
+        rec.active = False
+        self._unregister_run(rid)
+        self._reapply_highlights_for_pkg(self.selected_pkg.name)
+        self._set_status(f"Stopped exec: {exe}")
+
+    def _stop_selected_launch(self):
+        if not self.selected_pkg:
+            return
+        sel = self.launch_list.curselection()
+        if not sel:
+            return
+        raw = self.launch_list.get(sel[0])
+        if raw.startswith("[src] "):
+            tag, leaf = "src", raw[len("[src] "):]
+        elif raw.startswith("[inst] "):
+            tag, leaf = "inst", raw[len("[inst] "):]
+        else:
+            return
+        key = self._launch_key(self.selected_pkg.name, tag, leaf)
+        run_ids = [rid for rid in self.key_to_runids.get(key, []) if self.runs[rid].active]
+        if not run_ids:
+            return
+        rid = sorted(run_ids)[-1]
+        rec = self.runs[rid]
+        _stop_by_marker(rec.marker)
+        rec.active = False
+        self._unregister_run(rid)
+        self._reapply_highlights_for_pkg(self.selected_pkg.name)
+        self._set_status(f"Stopped launch: {leaf}")
+
+    def _stop_selected_running(self):
+        if not self.running_list:
+            return
+        sel = self.running_list.curselection()
+        if not sel:
+            return
+        label = self.running_list.get(sel[0])
+        # parse label: "[kind] pkg :: display"
+        try:
+            kind = label.split("]", 1)[0].strip("[")
+            rest = label.split("] ", 1)[1]
+            pkg, display = [s.strip() for s in rest.split("::", 1)]
+        except Exception:
+            return
+        candidates = [r for r in self.runs.values() if r.active and r.kind == kind and r.pkg == pkg and r.display_name == display]
+        if not candidates:
+            return
+        rec = sorted(candidates, key=lambda r: r.run_id)[-1]  # newest
+        _stop_by_marker(rec.marker)
+        rec.active = False
+        self._unregister_run(rec.run_id)
+        if self.selected_pkg and self.selected_pkg.name == pkg:
+            self._reapply_highlights_for_pkg(pkg)
+        self._set_status(f"Stopped: [{rec.kind}] {rec.pkg} :: {rec.display_name}")
+
+    # ----- polling -----
+    def _start_poll(self):
+        # mark finished runs
+        finished: List[str] = []
+        for rid, rec in list(self.runs.items()):
+            if rec.active and not _marker_alive(rec.marker):
+                rec.active = False
+                finished.append(rid)
+
+        # unregister finished and refresh visuals
+        touched_pkgs = set()
+        for rid in finished:
+            pkg = self.runs[rid].pkg if rid in self.runs else None
+            self._unregister_run(rid)
+            if pkg:
+                touched_pkgs.add(pkg)
+
+        if self.selected_pkg and self.selected_pkg.name in touched_pkgs:
+            self._reapply_highlights_for_pkg(self.selected_pkg.name)
+
+        # schedule next tick
+        self.after(1000, self._start_poll)
+
+    # -------------------- run actions --------------------
     def _on_launch_double(self, ev):
         # Ensure the item under the mouse is selected, then defer launch a tick
         try:
@@ -658,8 +988,10 @@ class Ros2App(tk.Tk):
         self.after(1, self._run_launch)
 
     def _run_tool(self, cmd: str):
+        # Tools (rviz2, rqt, etc.) are not tracked/highlighted
         full = self._prefixed(cmd)
-        if not open_in_terminal(full):
+        ok = open_in_terminal(full)
+        if not ok:
             messagebox.showerror("Error", "Could not open a terminal to run the command.")
         else:
             self._set_status(f"Started: {cmd}")
@@ -678,10 +1010,18 @@ class Ros2App(tk.Tk):
         if extra:
             cmd += f" {extra}"
         full = self._prefixed(cmd)
-        if not open_in_terminal(full):
+
+        tagged, marker, run_id = _inject_marker(full)
+        if not open_in_terminal(tagged):
             messagebox.showerror("Error", "Could not open a terminal to run the executable.")
-        else:
-            self._set_status(f"Running: {cmd}")
+            return
+
+        key = self._exec_key(self.selected_pkg.name, exe)
+        rec = RunRecord(run_id, "exec", self.selected_pkg.name, key, exe, marker, full, None, True)
+        self._register_run(rec)
+
+        self._reapply_highlights_for_pkg(self.selected_pkg.name)
+        self._set_status(f"Running: {cmd}")
 
     def _run_launch(self):
         """Run the selected launch file (parses args, prompts for values, YAML-aware quoting)."""
@@ -704,17 +1044,16 @@ class Ros2App(tk.Tk):
         if tag == "inst":
             li: LaunchItem = obj  # type: ignore
             path = li.path.resolve()
-            rel_display = li.rel_from_share_launch.as_posix() if li.rel_from_share_launch else path.name
             workdir = path.parent
-            arg_specs = parse_launch_args_generic(path)
+            rel_display = li.rel_from_share_launch.as_posix() if li.rel_from_share_launch else path.name
         else:
             path: Path = obj  # type: ignore
             path = path.resolve()
-            rel_display = path.name
             workdir = path.parent
-            arg_specs = parse_launch_args_generic(path)
+            rel_display = path.name
 
         # ---- prompt for values if the file declares arguments
+        arg_specs = parse_launch_args_generic(path)
         user_args = {}
         if arg_specs:
             dlg = ArgDialog(self, f"Launch arguments: {rel_display}", arg_specs)
@@ -725,46 +1064,53 @@ class Ros2App(tk.Tk):
             user_args = dlg.values  # dict: name -> str
 
         # ---- YAML-aware formatting (avoid quoting lists/numbers/bools/dicts)
-        import re
+        import re as _re
         def _looks_yaml_scalar_or_collection(s: str) -> bool:
             s = s.strip()
             if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
                 return True
             if s.lower() in ("true", "false", "null", "~"):
                 return True
-            if re.fullmatch(r"[-+]?\d+(\.\d+)?([eE][-+]?\d+)?", s):
+            if _re.fullmatch(r"[-+]?\d+(\.\d+)?([eE][-+]?\d+)?", s):
                 return True
             return False
 
         def _fmt_arg(k: str, v: str) -> str:
             v = v.strip()
-            # Respect user's own quotes
             if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
                 return f"{k}:={v}"
-            # Only quote plain strings; pass YAML-ish values as-is
             return f"{k}:={v}" if _looks_yaml_scalar_or_collection(v) else f"{k}:={shlex.quote(v)}"
 
         arg_pairs = [_fmt_arg(k, v) for k, v in user_args.items()]
 
         # Also append anything typed in the free-form "Launch args" field (if present)
-        extra_text = ""
-        if hasattr(self, "launch_args_var") and hasattr(self.launch_args_var, "get"):
-            extra_text = self.launch_args_var.get().strip()
+        extra_text = self.launch_args_var.get().strip() if hasattr(self, "launch_args_var") else ""
         extra_parts = shlex.split(extra_text) if extra_text else []
 
         # ---- build command
         if tag == "inst":
-            rel_sub = li.rel_from_share_launch.as_posix() if li.rel_from_share_launch else path.name  # type: ignore
+            rel_sub = rel_display
             cmd_elems = ["ros2", "launch", self.selected_pkg.name, rel_sub] + arg_pairs + extra_parts
         else:
             cmd_elems = ["ros2", "launch", str(path)] + arg_pairs + extra_parts
 
         cmd = " ".join(shlex.quote(x) for x in cmd_elems)
         full = self._prefixed(cmd, workdir=workdir)
-        if not open_in_terminal(full, cwd=workdir):
+
+        # Inject marker
+        tagged, marker, run_id = _inject_marker(full)
+
+        if not open_in_terminal(tagged, cwd=workdir):
             messagebox.showerror("Error", f"Could not open a terminal to run:\n{cmd}")
             return
 
+        # register + highlight
+        leaf_or_rel = rel_display if tag == "inst" else path.name
+        key = self._launch_key(self.selected_pkg.name, tag, leaf_or_rel)
+        rec = RunRecord(run_id, "launch", self.selected_pkg.name, key, leaf_or_rel, marker, full, workdir, True)
+        self._register_run(rec)
+
+        self._reapply_highlights_for_pkg(self.selected_pkg.name)
         self._set_status(f"Launching: {cmd}")
 
     def _run_custom_launch(self):
@@ -780,7 +1126,15 @@ class Ros2App(tk.Tk):
             if extra:
                 cmd += f" {extra}"
             full = self._prefixed(cmd)
-            ok = open_in_terminal(full, cwd=p.parent)
+            tagged, marker, run_id = _inject_marker(full)
+            ok = open_in_terminal(tagged, cwd=p.parent)
+            if ok:
+                # not mapped to a package view; still list in running panel
+                rec = RunRecord(run_id, "launch", "<path>", f"launch::<path>::src::{p.name}", p.name, marker, full, p.parent, True)
+                self._register_run(rec)
+                self._set_status(f"Launching: {spec}")
+            else:
+                messagebox.showerror("Error", "Could not open a terminal to run the custom launch.")
         else:
             parts = spec.split(maxsplit=1)
             if len(parts) != 2:
@@ -791,11 +1145,14 @@ class Ros2App(tk.Tk):
             if extra:
                 cmd += f" {extra}"
             full = self._prefixed(cmd)
-            ok = open_in_terminal(full)
-        if not ok:
-            messagebox.showerror("Error", "Could not open a terminal to run the custom launch.")
-        else:
-            self._set_status(f"Launching: {spec}")
+            tagged, marker, run_id = _inject_marker(full)
+            ok = open_in_terminal(tagged)
+            if ok:
+                rec = RunRecord(run_id, "launch", pkg, f"launch::{pkg}::inst::{rel}", rel, marker, full, None, True)
+                self._register_run(rec)
+                self._set_status(f"Launching: {spec}")
+            else:
+                messagebox.showerror("Error", "Could not open a terminal to run the custom launch.")
 
 
 # ----------------------------- CLI / entrypoint -----------------------------------

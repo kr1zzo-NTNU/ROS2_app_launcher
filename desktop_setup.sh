@@ -4,7 +4,7 @@ APP_DIR="/opt/ros2-app-launcher"
 
 # Install app files system-wide
 sudo install -Dm755 "$SRC_DIR/ros2_app_launcher.py" "$APP_DIR/ros2_app_launcher.py"
-sudo install -Dm644 "$SRC_DIR/kros.png"             "$APP_DIR/kros.png"
+sudo install -Dm644 "$SRC_DIR/assets/kros.png"             "$APP_DIR/assets/kros.png"
 
 # Wrapper script (uses current user's $HOME at runtime)
 sudo tee "$APP_DIR/run.sh" > /dev/null <<'EOSH'
@@ -21,7 +21,7 @@ Type=Application
 Name=ROS 2 App Launcher
 Comment=Scan, run and launch ROS 2 packages
 Exec=/opt/ros2-app-launcher/run.sh
-Icon=/opt/ros2-app-launcher/kros.png
+Icon=/opt/ros2-app-launcher/assets/kros.png
 Terminal=false
 Categories=Development;
 StartupNotify=true
