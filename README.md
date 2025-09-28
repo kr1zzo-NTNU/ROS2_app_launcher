@@ -3,6 +3,10 @@
 A **graphical launcher for ROS 2** that makes it simple to discover, run, and manage executables and launch files in your ROS 2 workspaces.  
 No more memorizing long `ros2 run` or `ros2 launch` commands, just point it to your workspace and click!
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Demo" width="600"/>
+</p>
+
 ## ✨ Features
 
 - 🔍 **Automatic Workspace Scanning**
