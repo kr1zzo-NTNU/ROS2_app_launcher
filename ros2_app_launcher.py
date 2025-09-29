@@ -270,6 +270,7 @@ def open_in_terminal(command: str, cwd: Optional[Path] = None) -> bool:
 
 
 def autodetect_ws_setup(start: Path) -> Optional[str]:
+    # 1) Walk upward (original behavior)
     cur = start.resolve()
     for _ in range(10):
         candidate = cur / "install" / "setup.bash"
@@ -278,6 +279,25 @@ def autodetect_ws_setup(start: Path) -> Optional[str]:
         if cur.parent == cur:
             break
         cur = cur.parent
+
+    # 2) New: look downward a bit for typical workspaces
+    try_paths = []
+    # Search a few common subdir names quickly
+    common = ["*", "*_ws", "ros2_ws", "dev_ws"]
+    for pat in common:
+        try_paths.extend(start.glob(f"**/{pat}/install/setup.bash"))
+
+    # Fallback: a bounded depth search (avoid scanning entire $HOME on huge trees)
+    if not try_paths:
+        for p in start.glob("**/install/setup.bash"):
+            try_paths.append(p)
+            if len(try_paths) > 10:  # don’t get carried away
+                break
+
+    for p in try_paths:
+        if p.is_file():
+            return str(p.resolve())
+
     return None
 
 
